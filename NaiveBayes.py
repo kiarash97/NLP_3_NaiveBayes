@@ -8,11 +8,13 @@ import itertools
 from sklearn.metrics import confusion_matrix,precision_recall_fscore_support
 import matplotlib.pyplot as plt
 import hazm
+import subprocess
 
-class NaiveBayesClassifier():
+class Classifier():
     
     def __init__(self, firstClassDataPath , secondClassDataPath , trainTestSplitFactor =0.1 , firstClassLabel = "1" ,
-                 secondClassLabel = "2", flagShowPlot = True , effectiveFeaturesNumber = 10 , flagPrintResults = True):
+                 secondClassLabel = "2", flagShowPlot = True , effectiveFeaturesNumber = 10 , flagPrintResults = True
+                 ,min = -1 , max = 1 , cutoff = 0 , vwlossfunction ='quantile' , ngram = 1):
 
         self.firstClassLabel = firstClassLabel
         self.secondClassLabel = secondClassLabel
@@ -20,6 +22,8 @@ class NaiveBayesClassifier():
         self.firstClassDataPath = firstClassDataPath     
         self.secondClassDataPath = secondClassDataPath
         self.trainTestSplitFactor = trainTestSplitFactor
+        self.vwlossfunction = vwlossfunction
+        self.vwngram = ngram
 
         self.getFiles()
         self.splitTrainTest()
@@ -37,11 +41,16 @@ class NaiveBayesClassifier():
             plt.show()
             plt.close()
 
+        self.convertVWDataFormat(min,max)
+        self.runVowpalwabbit(min,max,cutoff)
+        self.printVWResult()
+
+
     def getFiles(self):
         """This function find all the file names in the path directory of each class"""
         self.firstClassAllFiles = glob.glob(os.path.join(self.firstClassDataPath, '*.txt'))
         self.secondClassAllFiles = glob.glob(os.path.join(self.secondClassDataPath, '*.txt'))
-    
+
     def splitTrainTest(self):
         """This function split the data into train & test by splitFactor"""
         numberOf1stTrainSamples = int((1 - self.trainTestSplitFactor) * len(self.firstClassAllFiles))
@@ -63,7 +72,7 @@ class NaiveBayesClassifier():
         for fileName in self.secondClassAllFiles:
             if fileName not in self.secondClassTrainFiles:
                 self.secondClassTestFiles.append(fileName)
-                
+
     def readTrainTestFiles(self):
         """This function loads all train and test datas into list and preprocess them"""
         self.firstClassTrainList = []
@@ -246,9 +255,127 @@ class NaiveBayesClassifier():
 
         print("Accuracy :(number of true predicts/ total predictions) = ", self.accuracy)
 
+    def convertVWDataFormat(self, min, max):
+        firstCounter = 0
+        secondCounter = 0
+        firstClassTrainSentences = []
+        secondClassTrainSentences = []
+        firstClassTestSentences = []
+        secondClassTestSentences = []
+
+        fileTrain = open("Train.txt", "w")
+        fileTest = open("Test.txt", "w")
+
+        for fileName in self.firstClassTrainFiles:
+            sentences = hazm.sent_tokenize(open(fileName, 'r').read())
+            for s in sentences:
+                firstClassTrainSentences.append(s)
+        for fileName in self.secondClassTrainFiles:
+            sentences = hazm.sent_tokenize(open(fileName, 'r').read())
+            for s in sentences:
+                secondClassTrainSentences.append(s)
+
+        for fileName in self.firstClassTestFiles:
+            sentences = hazm.sent_tokenize(open(fileName, 'r').read())
+            for s in sentences:
+                firstClassTestSentences.append(s)
+        for fileName in self.secondClassTestFiles:
+            sentences = hazm.sent_tokenize(open(fileName, 'r').read())
+            for s in sentences:
+                secondClassTestSentences.append(s)
+
+
+        while firstCounter < len(firstClassTrainSentences) and secondCounter < len(secondClassTrainSentences):
+            firstClassTrainSentences[firstCounter] = self.preProcessingVW(firstClassTrainSentences[firstCounter])
+            secondClassTrainSentences[secondCounter] = self.preProcessingVW(secondClassTrainSentences[secondCounter])
+            if len(firstClassTrainSentences[firstCounter]) >= 0 and len(secondClassTrainSentences[secondCounter]) >= 0:
+                fileTrain.write(str(max) +" |" + firstClassTrainSentences[firstCounter] + "\n")
+                fileTrain.write(str(min) +" |" + secondClassTrainSentences[secondCounter] + "\n")
+            firstCounter += 1
+            secondCounter += 1
+
+        firstCounter = 0
+        secondCounter = 0
+
+        while firstCounter < len(firstClassTestSentences) and secondCounter < len(secondClassTestSentences):
+            firstClassTestSentences[firstCounter] = self.preProcessingVW(firstClassTestSentences[firstCounter])
+            secondClassTestSentences[secondCounter] = self.preProcessingVW(secondClassTestSentences[secondCounter])
+            if len(firstClassTestSentences[firstCounter]) >= 0 and len(secondClassTestSentences[secondCounter]) >= 0:
+                fileTest.write(str(max) +" |" + firstClassTestSentences[firstCounter] + "\n")
+                fileTest.write(str(min) +" |" + secondClassTestSentences[secondCounter] + "\n")
+            firstCounter += 1
+            secondCounter += 1
+
+    def runVowpalwabbit(self, min, max, cutOffNumber):
+        try:
+            subprocess.check_output(['rm', 'Train.txt.cache'])
+            subprocess.check_output(['rm', 'predictor.vw'])
+            subprocess.check_output(['rm', 'prediction.txt'])
+        except:
+            pass
+
+        subprocess.check_output(['vw', '-d', 'Train.txt', '-c', '--passes', '10', '-f', 'predictor.vw',
+                                 '--ngram', str(self.vwngram), '--loss_function',self.vwlossfunction])
+        subprocess.check_output(['vw', '-d', 'Test.txt', '-t', '-i', 'predictor.vw', '-p', 'prediction.txt'])
+
+        f1 = open("Test.txt", "r")
+        f2 = open("Prediction.txt", "r")
+        true = []
+        pred = []
+        for i in f1.readlines():
+            true.append(int(i.split("|")[0]))
+
+        for i in f2.readlines():
+            pred.append(self.actfunction(float(i.strip()) , cutOffNumber,min,max))
+
+
+
+        self.vwprecision, self.vwrecall, self.vwfscore, self.vwsupport = precision_recall_fscore_support(true, pred)
+        cm = confusion_matrix(true, pred)
+        self.vwaccuracy = (cm[0][0] + cm[1][1]) / (self.vwsupport[0] + self.vwsupport[1])
+
+    def printVWResult(self):
+
+        print("number of",self.firstClassLabel,"test sentences vw-> ", self.vwsupport[0])
+        print(self.firstClassLabel,"precision vw -> ", self.vwprecision[0])
+        print(self.firstClassLabel,"recall vw-> ", self.vwrecall[0])
+        print(self.firstClassLabel,"fscore vw-> ", self.vwfscore[0], "\n\n")
+
+        print("number of",self.secondClassLabel,"test sentences vw-> ", self.vwsupport[1])
+        print(self.secondClassLabel,"precision vw-> ", self.vwprecision[1])
+        print(self.secondClassLabel,"recall vw-> ", self.vwrecall[1])
+        print(self.secondClassLabel,"fscore vw-> ", self.vwfscore[1], "\n\n")
+
+        print("Accuracy :(number of true predicts/ total predictions) = ", self.vwaccuracy)
+
+    def actfunction(self, x, cutOffNumber, min, max):
+        if x < cutOffNumber:
+            return min
+        else:
+            return max
+
+    def preProcessingVW(self, doc):
+        junkList = [".", "-", "]", "[", "،", "؛", ":", ")", "(", "!", "؟", "»", "«", "ْ"]
+        junkWords = ["که", "از", "با", "برای", "با", "به", "را", "هم", "و", "در", "تا", "یا", "هر", "می", "بر"]
+        pronouns = ["من", "تو", "او", "ما", "شما", "ایشان", "آن‌ها", "این‌ها", "آن", "این", "اونجا", "آنجا", "انجا",
+                    "اینها", "آنها"
+            , "اینکه"]
+        for char in junkList:
+            doc = doc.replace(char, "")
+        doc.strip()
+        doc = hazm.Normalizer().normalize(doc)
+        return doc
+
+
 if __name__ == '__main__':
     emamPath = '/Users/kiarash/PycharmProjects/NLP_HW3_NaiiveBayse/emam2'
     shahPath = '/Users/kiarash/PycharmProjects/NLP_HW3_NaiiveBayse/shah2'
-    x = NaiveBayesClassifier(emamPath , shahPath , trainTestSplitFactor =0.1 , firstClassLabel = "emam" ,
-                 secondClassLabel = "shah", flagShowPlot = True , effectiveFeaturesNumber = 10 , flagPrintResults=True)
+
+
+    # you can change the configurations by passing the arguments to the class here
+    # all the steps such as normalization , train test split, ... are running sequentially & automatically
+    # after making an instance of the Classifier class
+    x = Classifier(emamPath , shahPath , trainTestSplitFactor =0.1 , firstClassLabel = "emam" ,
+                 secondClassLabel = "shah", flagShowPlot = False , effectiveFeaturesNumber = 10 , flagPrintResults=True ,
+                 min=-1 , max=1 , cutoff=0 ,vwlossfunction ='quantile' , ngram= 1)
 
